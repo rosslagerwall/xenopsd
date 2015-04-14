@@ -573,22 +573,44 @@ module VM = struct
 			else helper (i-1)  (List.hd list :: acc) (List.tl list)
 		in List.rev $ helper n [] list
 
-	let generate_non_persistent_state xc xs vm =
+	let generate_non_persistent_state xc xs vm pcis =
 		let hvm = match vm.ty with HVM _ -> true | _ -> false in
 		(* XXX add per-vcpu information to the platform data *)
 		(* VCPU configuration *)
 		let pcpus = Xenctrlext.get_max_nr_cpus xc in							
 		let all_pcpus = mkints pcpus in
 		let all_vcpus = mkints vm.vcpu_max in
-		let masks = match vm.scheduler_params.affinity with
-			| [] ->
-				(* Every vcpu can run on every pcpu *)
-				List.map (fun _ -> all_pcpus) all_vcpus
-			| m :: ms ->
-				(* Treat the first as the template for the rest *)
-				let defaults = List.map (fun _ -> m) all_vcpus in
-				take vm.vcpu_max (m :: ms @ defaults) in
-		(* convert a mask into a binary string, one char per pCPU *)
+                let numa_mask pcidev =
+                    let cpu_info = Xenctrl.domain_getcputopoinfo xc in
+                    let cpu_nodes = List.mapi (fun idx (elem:Xenctrl.cputopoinfo) -> (idx, elem.Xenctrl.node)) cpu_info in
+                    let pci_info = Xenctrl.domain_getpcitopoinfo xc [pcidev] in
+                    let get_node pci_info = (List.hd pci_info).Xenctrl.node in
+                    let close_cpus cpu_nodes = List.filter (fun cpu -> (snd cpu) == (get_node pci_info)) cpu_nodes in
+                    debug "XQAB %d" vm.vcpu_max;
+                    match pci_info with
+                        | [] ->
+                                (* Every vcpu can run on every pcpu *)
+                                List.map (fun _ -> all_pcpus) all_vcpus
+                        | _ -> if vm.vcpu_max > (List.length (close_cpus cpu_nodes)) then
+                                   (* Every vcpu can run on every pcpu *)
+                                   List.map (fun _ -> all_pcpus) all_vcpus
+                                else
+                                    List.map (fun _ -> (List.map (fun cpu -> (fst cpu)) (close_cpus cpu_nodes))) all_vcpus
+                    in
+                let masks = match vm.scheduler_params.affinity with
+                        | [] ->
+                                if (List.length pcis) == 1 then
+                                    (* debug "VM = %s; XQAB %d %d %d" vm.Vm.id firstpci.Pci.domain firstpci.Pci.bus ((firstpci.Pci.dev lsl 3) lor firstpci.Pci.fn); *)
+                                    let dev = (List.hd pcis) in
+                                    (numa_mask { Xenctrl.seg = dev.Pci.domain; Xenctrl.bus = dev.Pci.bus; Xenctrl.devfn = ((dev.Pci.dev lsl 3) lor dev.Pci.fn); Xenctrl.node = 0 })
+                                else
+                                    (* Every vcpu can run on every pcpu *)
+                                    List.map (fun _ -> all_pcpus) all_vcpus
+                        | m :: ms ->
+                                (* Treat the first as the template for the rest *)
+                                let defaults = List.map (fun _ -> m) all_vcpus in
+                                take vm.vcpu_max (m :: ms @ defaults) in
+                (* convert a mask into a binary string, one char per pCPU *)
 		let bitmap cpus: string = 
 			let cpus = List.filter (fun x -> x >= 0 && x < pcpus) cpus in
 			let result = String.make pcpus '0' in
@@ -636,7 +658,7 @@ module VM = struct
 			pci_power_mgmt = vm.Vm.pci_power_mgmt;
 		}
 
-	let create_exn (task: Xenops_task.t) memory_upper_bound vm =
+	let create_exn (task: Xenops_task.t) memory_upper_bound vm pcis =
 		let k = vm.Vm.id in
 		with_xc_and_xs
 			(fun xc xs ->
@@ -648,7 +670,7 @@ module VM = struct
 						| None -> begin
 							debug "VM = %s; has no stored domain-level configuration, regenerating" vm.Vm.id;
 							let persistent = { VmExtra.build_info = None; ty = None; last_start_time = Unix.gettimeofday ()} in
-							let non_persistent = generate_non_persistent_state xc xs vm in
+							let non_persistent = generate_non_persistent_state xc xs vm pcis in
 							persistent, non_persistent
 						end in
 				let open Memory in
@@ -1500,7 +1522,7 @@ module VM = struct
 			| _ -> persistent
 		in
 		let non_persistent = match DB.read k with
-		| None -> with_xc_and_xs (fun xc xs -> generate_non_persistent_state xc xs vm)
+                | None -> with_xc_and_xs (fun xc xs -> generate_non_persistent_state xc xs vm [])
 		| Some vmextra -> vmextra.VmExtra.non_persistent
 		in
 		DB.write k { VmExtra.persistent = persistent; VmExtra.non_persistent = non_persistent; }

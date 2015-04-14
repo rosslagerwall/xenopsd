@@ -1048,7 +1048,7 @@ let perform_atomic ~progress_callback ?subtask (op: atomic) (t: Xenops_task.t) :
 			B.VM.destroy t (VM_DB.read_exn id)
 		| VM_create (id, memory_upper_bound) ->
 			debug "VM.create %s memory_upper_bound = %s" id (Opt.default "None" (Opt.map Int64.to_string memory_upper_bound));
-			B.VM.create t memory_upper_bound (VM_DB.read_exn id)
+			B.VM.create t memory_upper_bound (VM_DB.read_exn id) (PCI_DB.pcis id)
 		| VM_build id ->
 			debug "VM.build %s" id;
 			let vbds : Vbd.t list = VBD_DB.vbds id |> vbd_plug_order in
