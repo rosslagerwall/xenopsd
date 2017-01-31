@@ -1682,16 +1682,19 @@ let __start (task: Xenops_task.t) ~xs ~dmpath ?(timeout = !Xenopsd.qemu_dm_ready
 	let () = match info.disp with
 	| VNC (Vgpu [{implementation = Nvidia vgpu}], _, _, _, _)
 	| SDL (Vgpu [{implementation = Nvidia vgpu}], _) -> begin
-		(* The below line does nothing if the device is already bound to the
-		 * nvidia driver. We rely on xapi to refrain from attempting to run
-		 * a vGPU on a device which is passed through to a guest. *)
-		PCI.bind [vgpu.physical_pci_address] PCI.Nvidia;
-		let args = vgpu_args_of_nvidia domid info.vcpus vgpu in
-		let ready_path = Printf.sprintf "/local/domain/%d/vgpu-pid" domid in
-		let cancel = Cancel_utils.Vgpu domid in
-		let vgpu_pid = init_daemon ~task ~path:!Xc_path.vgpu ~args
-			~name:"vgpu" ~domid ~xs ~ready_path ~timeout:!Xenopsd.vgpu_ready_timeout ~cancel () in
-		Forkhelpers.dontwaitpid vgpu_pid
+		if not (Vgpu.is_running ~xs domid) then begin
+			(* The below line does nothing if the device is already bound to the
+			 * nvidia driver. We rely on xapi to refrain from attempting to run
+			 * a vGPU on a device which is passed through to a guest. *)
+			PCI.bind [vgpu.physical_pci_address] PCI.Nvidia;
+			let args = vgpu_args_of_nvidia domid info.vcpus vgpu in
+			let ready_path = Printf.sprintf "/local/domain/%d/vgpu-pid" domid in
+			let cancel = Cancel_utils.Vgpu domid in
+			let vgpu_pid = init_daemon ~task ~path:!Xc_path.vgpu ~args
+				~name:"vgpu" ~domid ~xs ~ready_path ~timeout:!Xenopsd.vgpu_ready_timeout ~cancel () in
+			Forkhelpers.dontwaitpid vgpu_pid
+		end else
+			D.info "Daemon %s is already running for domain %d" !Xc_path.vgpu domid
 	end
 	| VNC (Vgpu [{implementation = GVT_g vgpu}], _, _, _, _)
 	| SDL (Vgpu [{implementation = GVT_g vgpu}], _) ->
@@ -1725,22 +1728,6 @@ let start_vnconly (task: Xenops_task.t) ~xs ~dmpath ?timeout info domid =
 
 (* suspend/resume is a done by sending signals to qemu *)
 let suspend (task: Xenops_task.t) ~xs ~qemu_domid domid =
-	let suspend_vgpu () = match Vgpu.pid ~xs domid with
-	| None -> debug "vgpu: no process running"
-	| Some vgpu_pid -> begin
-		let tag = Printf.sprintf "(domid = %d pid = %d)" domid vgpu_pid in
-		debug "vgpu: suspending vgpu with SIGHUP %s" tag;
-		try
-			Unixext.kill_and_wait
-				~signal:Sys.sighup ~timeout:(!Xenopsd.vgpu_suspend_timeout) vgpu_pid;
-			debug "vgpu: suspended successfully %s" tag
-		with Unixext.Process_still_alive ->
-			debug "vgpu: didn't die within the timeout %s" tag;
-			let open Generic in
-			best_effort "killing vgpu" (fun () -> really_kill vgpu_pid);
-			failwith "vgpu suspend timed out"
-	end in
-	suspend_vgpu ();
 	signal task ~xs ~qemu_domid ~domid "save" ~wait_for:"paused"
 let resume (task: Xenops_task.t) ~xs ~qemu_domid domid =
 	signal task ~xs ~qemu_domid ~domid "continue" ~wait_for:"running"
